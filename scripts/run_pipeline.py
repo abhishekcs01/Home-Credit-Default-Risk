@@ -31,6 +31,7 @@ def run_full_pipeline(
     *,
     optimize_memory: bool = True,
     export_csv: bool = False,
+    force_recompute: bool = False,
     submission_output: Path | None = None,
     timestamped_submission_copy: bool = True,
     log_file: Path | None = None,
@@ -51,7 +52,11 @@ def run_full_pipeline(
 
     s = time.perf_counter()
     log.info("=== Stage 1/3: Preprocessing ===")
-    preprocess_mod.run_preprocessing(optimize_memory=optimize_memory, export_csv=export_csv)
+    preprocess_mod.run_preprocessing(
+        optimize_memory=optimize_memory,
+        export_csv=export_csv,
+        use_cache=not force_recompute,
+    )
     stages["preprocess_sec"] = time.perf_counter() - s
 
     s = time.perf_counter()
@@ -110,6 +115,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Append logs to this file (default: outputs/logs/pipeline_YYYYMMDD_HHMMSS.log).",
     )
+    p.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Ignore cached merged_train.pkl / merged_test.pkl and recompute preprocessing from raw CSVs.",
+    )
     return p.parse_args()
 
 
@@ -120,6 +130,7 @@ def main() -> None:
     run_full_pipeline(
         optimize_memory=not args.no_memory_opt,
         export_csv=args.export_csv,
+        force_recompute=args.force_recompute,
         submission_output=args.submission_output,
         timestamped_submission_copy=not args.no_timestamp_copy,
         log_file=log_path,

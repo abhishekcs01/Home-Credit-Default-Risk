@@ -1,0 +1,26 @@
+api:
+  title: "Home Credit Default Risk Inference API"
+  version: "1.0.0"
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  startup_load_model: true
+
+model:
+  bundle_path: "models/lightgbm_model.pkl"
+
+logging:
+  level: "INFO"
+  structured: true
+  logger_name: "home_credit.api"
+
+load_test:
+  host: "http://127.0.0.1:8000"
+  users: 25
+  spawn_rate: 5
+  run_time: "2m"
+  min_wait_seconds: 0.2
+  max_wait_seconds: 1.0
+  # Locust web UI (scripts/run_locust_ui.py) — not used for headless runs
+  locust_web_host: "127.0.0.1"
+  locust_web_port: 8089

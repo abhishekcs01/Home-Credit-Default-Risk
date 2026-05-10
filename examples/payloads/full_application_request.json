@@ -1,0 +1,31 @@
+{
+  "records": [
+    {
+      "SK_ID_CURR": 100002,
+      "NAME_CONTRACT_TYPE": "Cash loans",
+      "CODE_GENDER": "F",
+      "FLAG_OWN_CAR": "N",
+      "FLAG_OWN_REALTY": "Y",
+      "CNT_CHILDREN": 1,
+      "AMT_INCOME_TOTAL": 202500.0,
+      "AMT_CREDIT": 788846.5,
+      "AMT_ANNUITY": 26000.0,
+      "AMT_GOODS_PRICE": 688500.0,
+      "NAME_TYPE_SUITE": "Unaccompanied",
+      "NAME_INCOME_TYPE": "Working",
+      "NAME_EDUCATION_TYPE": "Higher education",
+      "NAME_FAMILY_STATUS": "Married",
+      "NAME_HOUSING_TYPE": "House / apartment",
+      "REGION_POPULATION_RELATIVE": 0.018801,
+      "DAYS_BIRTH": -12005,
+      "DAYS_EMPLOYED": -4542,
+      "DAYS_REGISTRATION": -3648.0,
+      "DAYS_ID_PUBLISH": -2120,
+      "OCCUPATION_TYPE": "Core staff",
+      "ORGANIZATION_TYPE": "Business Entity Type 3",
+      "EXT_SOURCE_1": 0.641066,
+      "EXT_SOURCE_2": 0.652897,
+      "EXT_SOURCE_3": 0.534122
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "records": [
+    {
+      "SK_ID_CURR": 100003,
+      "AMT_INCOME_TOTAL": 180000.0,
+      "AMT_CREDIT": 512000.0,
+      "AMT_ANNUITY": 21000.0,
+      "NAME_INCOME_TYPE": "Working",
+      "ORGANIZATION_TYPE": "Construction",
+      "EXT_SOURCE_2": 0.48
+    },
+    {
+      "SK_ID_CURR": 100004,
+      "AMT_INCOME_TOTAL": 90000.0,
+      "AMT_CREDIT": 300000.0,
+      "AMT_ANNUITY": 15000.0,
+      "NAME_INCOME_TYPE": "Pensioner",
+      "ORGANIZATION_TYPE": "XNA",
+      "EXT_SOURCE_2": 0.22
+    },
+    {
+      "SK_ID_CURR": 100005,
+      "AMT_INCOME_TOTAL": 260000.0,
+      "AMT_CREDIT": 950000.0,
+      "AMT_ANNUITY": 34000.0,
+      "NAME_INCOME_TYPE": "State servant",
+      "ORGANIZATION_TYPE": "Self-employed",
+      "EXT_SOURCE_2": 0.71
+    }
+  ]
+}

@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
+CACHE_DIR = DATA_DIR / "cache"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 
@@ -48,9 +49,13 @@ MERGED_TEST_CSV_PATH = PROCESSED_DATA_DIR / "merged_test.csv"
 # Training outputs
 MODEL_BUNDLE_PATH = MODELS_DIR / "lightgbm_model.pkl"
 ROC_CURVE_PATH = FIGURES_DIR / "roc_curve.png"
+PR_CURVE_PATH = FIGURES_DIR / "pr_curve.png"
 FEATURE_IMPORTANCE_PATH = FIGURES_DIR / "feature_importance.png"
 TRAINING_METRICS_JSON_PATH = METRICS_DIR / "training_metrics.json"
+FOLD_METRICS_CSV_PATH = METRICS_DIR / "fold_metrics.csv"
 FEATURE_IMPORTANCE_TOP15_CSV_PATH = METRICS_DIR / "feature_importance_top15.csv"
+TRAINING_METADATA_JSON_PATH = METRICS_DIR / "training_metadata.json"
+TRAINING_CONFIG_SNAPSHOT_PATH = METRICS_DIR / "config_snapshot.json"
 
 # Inference — canonical submission location (+ timestamped copies beside it)
 SUBMISSION_PATH = SUBMISSIONS_DIR / "submission.csv"
@@ -64,6 +69,8 @@ OHE_MAX_CATEGORIES = 15
 MISS_DROP_THRESHOLD = 0.70
 PRUNE_BOTTOM_FRAC = 0.06
 N_FOLD_ENSEMBLE = 5
+BLEND_WEIGHT_LGB = 0.5
+BLEND_WEIGHT_CAT = 0.5
 
 LGBM_BASE_PARAMS = {
     "objective": "binary",

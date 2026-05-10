@@ -1,0 +1,1 @@
+"""FastAPI inference application package."""

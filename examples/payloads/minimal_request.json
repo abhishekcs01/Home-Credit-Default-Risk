@@ -1,0 +1,10 @@
+{
+  "records": [
+    {
+      "SK_ID_CURR": 100001,
+      "AMT_INCOME_TOTAL": 135000.0,
+      "AMT_CREDIT": 450000.0,
+      "ORGANIZATION_TYPE": "Business Entity Type 3"
+    }
+  ]
+}

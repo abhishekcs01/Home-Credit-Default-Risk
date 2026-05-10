@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -11,7 +14,12 @@ from sklearn.preprocessing import StandardScaler
 from src import config
 from src.aggregation import merge_stage
 from src.feature_engineering import engineer_application_features
-from src.preprocessing import DesignMatrixPreprocessor, dataframe_to_design_matrix
+from src.preprocessing import DesignMatrixPreprocessor
+
+try:
+    from catboost import CatBoostClassifier
+except ImportError:  # pragma: no cover - optional in test environment
+    CatBoostClassifier = None
 
 
 def _lgb_binary_params(scale_pos_weight: float, random_state: int) -> dict:
@@ -21,19 +29,79 @@ def _lgb_binary_params(scale_pos_weight: float, random_state: int) -> dict:
     return params
 
 
-def _indices_after_gain_prune(gbm: lgb.Booster, bottom_frac: float) -> np.ndarray | None:
-    if bottom_frac <= 0:
+def _catboost_binary_params(scale_pos_weight: float, random_state: int) -> dict:
+    return {
+        "loss_function": "Logloss",
+        "eval_metric": "AUC",
+        "iterations": 1200,
+        "learning_rate": 0.03,
+        "depth": 6,
+        "l2_leaf_reg": 8.0,
+        "subsample": 0.85,
+        "random_strength": 0.5,
+        "auto_class_weights": None,
+        "scale_pos_weight": scale_pos_weight,
+        "random_seed": random_state,
+        "verbose": False,
+        "allow_writing_files": False,
+    }
+
+
+def _train_lgb(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    *,
+    random_state: int,
+) -> lgb.Booster:
+    pos, neg = (y_train == 1).sum(), (y_train == 0).sum()
+    params = _lgb_binary_params(neg / pos if pos else 1.0, random_state)
+    dtr = lgb.Dataset(x_train, label=y_train)
+    dva = lgb.Dataset(x_valid, label=y_valid, reference=dtr)
+    return lgb.train(
+        params,
+        dtr,
+        num_boost_round=5000,
+        valid_sets=[dva],
+        valid_names=["valid"],
+        callbacks=[lgb.early_stopping(stopping_rounds=120), lgb.log_evaluation(period=0)],
+    )
+
+
+def _train_catboost(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    *,
+    random_state: int,
+):
+    if CatBoostClassifier is None:
         return None
-    imp = np.asarray(gbm.feature_importance(importance_type="gain"), dtype=float)
-    n = len(imp)
-    if n < 80:
-        return None
-    n_drop = max(1, int(n * bottom_frac))
-    worst = set(np.argsort(imp)[:n_drop].tolist())
-    keep = np.array([i for i in range(n) if i not in worst], dtype=int)
-    if keep.size < max(60, int(0.42 * n)):
-        return None
-    return keep
+    pos, neg = (y_train == 1).sum(), (y_train == 0).sum()
+    model = CatBoostClassifier(**_catboost_binary_params(neg / pos if pos else 1.0, random_state))
+    model.fit(x_train, y_train, eval_set=(x_valid, y_valid), use_best_model=True)
+    return model
+
+
+def _predict_catboost(model, x: np.ndarray) -> np.ndarray:
+    if model is None:
+        raise NotFittedError("CatBoost model is unavailable.")
+    return model.predict_proba(x)[:, 1].astype(np.float64)
+
+
+@dataclass
+class FoldPreparedData:
+    fold_id: int
+    train_idx: np.ndarray
+    valid_idx: np.ndarray
+    preprocessor: DesignMatrixPreprocessor
+    feature_names: list[str]
+    x_train: np.ndarray
+    y_train: np.ndarray
+    x_valid: np.ndarray
+    y_valid: np.ndarray
 
 
 def _logreg_holdout_and_cv(
@@ -59,44 +127,75 @@ def _logreg_holdout_and_cv(
     return auc_lr, float(np.mean(fold_aucs)), float(np.std(fold_aucs))
 
 
-def _lgb_train_val_prune(
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_val: np.ndarray,
-    y_val: np.ndarray,
-    names: list[str],
+def _prepare_fold_data(
+    df: pd.DataFrame,
     *,
-    scale_pos_weight: float,
+    n_splits: int,
     random_state: int,
-    prune_bottom_frac: float,
-) -> tuple[lgb.Booster, list[str], np.ndarray | None]:
-    params = _lgb_binary_params(scale_pos_weight, random_state)
-    train_set = lgb.Dataset(x_train, label=y_train)
-    val_set = lgb.Dataset(x_val, label=y_val, reference=train_set)
-    gbm = lgb.train(
-        params,
-        train_set,
-        num_boost_round=3000,
-        valid_sets=[train_set, val_set],
-        valid_names=["train", "valid"],
-        callbacks=[lgb.early_stopping(stopping_rounds=120), lgb.log_evaluation(period=0)],
-    )
-
-    feat_idx = _indices_after_gain_prune(gbm, prune_bottom_frac)
-    if feat_idx is not None:
-        x_train, x_val = x_train[:, feat_idx], x_val[:, feat_idx]
-        names = [names[i] for i in feat_idx]
-        train_set = lgb.Dataset(x_train, label=y_train)
-        val_set = lgb.Dataset(x_val, label=y_val, reference=train_set)
-        gbm = lgb.train(
-            params,
-            train_set,
-            num_boost_round=3000,
-            valid_sets=[train_set, val_set],
-            valid_names=["train", "valid"],
-            callbacks=[lgb.early_stopping(stopping_rounds=120), lgb.log_evaluation(period=0)],
+    ohe_max_categories: int,
+    miss_drop_threshold: float,
+) -> tuple[list[FoldPreparedData], np.ndarray]:
+    y_all = df["TARGET"].astype(int).to_numpy()
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    prepared: list[FoldPreparedData] = []
+    for fold_id, (tr_idx, va_idx) in enumerate(skf.split(np.zeros(len(df)), y_all), start=1):
+        df_tr = df.iloc[tr_idx].copy()
+        df_va = df.iloc[va_idx].copy()
+        prep = DesignMatrixPreprocessor(
+            ohe_max_categories=ohe_max_categories,
+            miss_drop_threshold=miss_drop_threshold,
+        ).fit(df_tr)
+        x_tr = prep.transform(df_tr)
+        x_va = prep.transform(df_va)
+        prepared.append(
+            FoldPreparedData(
+                fold_id=fold_id,
+                train_idx=tr_idx,
+                valid_idx=va_idx,
+                preprocessor=prep,
+                feature_names=list(prep.feature_names_),
+                x_train=x_tr,
+                y_train=y_all[tr_idx],
+                x_valid=x_va,
+                y_valid=y_all[va_idx],
+            )
         )
-    return gbm, names, feat_idx
+    return prepared, y_all
+
+
+def _accumulate_importance(
+    totals: dict[str, float],
+    counts: dict[str, int],
+    feature_names: list[str],
+    values: np.ndarray,
+) -> None:
+    for name, v in zip(feature_names, values, strict=False):
+        totals[name] = totals.get(name, 0.0) + float(v)
+        counts[name] = counts.get(name, 0) + 1
+
+
+def _select_stable_features(
+    lgb_totals: dict[str, float],
+    lgb_counts: dict[str, int],
+    cat_totals: dict[str, float],
+    cat_counts: dict[str, int],
+    *,
+    prune_bottom_frac: float,
+) -> set[str] | None:
+    if prune_bottom_frac <= 0:
+        return None
+    mean_scores: dict[str, float] = {}
+    all_names = set(lgb_totals) | set(cat_totals)
+    for name in all_names:
+        lgb_mean = lgb_totals.get(name, 0.0) / max(1, lgb_counts.get(name, 0))
+        cat_mean = cat_totals.get(name, 0.0) / max(1, cat_counts.get(name, 0))
+        mean_scores[name] = 0.7 * lgb_mean + 0.3 * cat_mean
+    if len(mean_scores) < 80:
+        return None
+    ordered = sorted(mean_scores.items(), key=lambda kv: kv[1])
+    n_drop = max(1, int(len(ordered) * prune_bottom_frac))
+    selected = {k for k, _ in ordered[n_drop:]}
+    return selected if len(selected) >= max(60, int(0.42 * len(ordered))) else None
 
 
 def evaluate_models(
@@ -108,48 +207,58 @@ def evaluate_models(
     miss_drop_threshold: float = config.MISS_DROP_THRESHOLD,
     prune_bottom_frac: float = 0.0,
 ) -> dict:
-    prep = DesignMatrixPreprocessor(ohe_max_categories=ohe_max_categories, miss_drop_threshold=miss_drop_threshold)
-    prep.fit(df_merged)
-    x_full, y_full = prep.X_train_, prep.y_
-    names = list(prep.feature_names_)
-    x_train, x_val, y_train, y_val = train_test_split(
-        x_full, y_full, test_size=test_size, random_state=random_state, stratify=y_full
+    _ = prune_bottom_frac  # kept for backward-compatible function signature
+    train_df, val_df = train_test_split(
+        df_merged,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=df_merged["TARGET"],
     )
+    prep = DesignMatrixPreprocessor(
+        ohe_max_categories=ohe_max_categories,
+        miss_drop_threshold=miss_drop_threshold,
+    ).fit(train_df)
+    x_train, y_train = prep.transform(train_df), train_df["TARGET"].astype(int).to_numpy()
+    x_val, y_val = prep.transform(val_df), val_df["TARGET"].astype(int).to_numpy()
 
     auc_lr, mean_cv_lr, std_cv_lr = _logreg_holdout_and_cv(x_train, x_val, y_train, y_val, random_state=random_state)
-    pos, neg = (y_train == 1).sum(), (y_train == 0).sum()
-    scale_pos_weight = neg / pos if pos else 1.0
+    gbm = _train_lgb(x_train, y_train, x_val, y_val, random_state=random_state)
+    best_it = gbm.best_iteration if gbm.best_iteration is not None else -1
+    prob_val_lgb = gbm.predict(x_val, num_iteration=best_it)
+    prob_train_lgb = gbm.predict(x_train, num_iteration=best_it)
 
-    gbm, names, feat_idx = _lgb_train_val_prune(
-        x_train,
-        y_train,
-        x_val,
-        y_val,
-        names,
-        scale_pos_weight=scale_pos_weight,
-        random_state=random_state,
-        prune_bottom_frac=prune_bottom_frac,
-    )
-    x_train_eval = x_train[:, feat_idx] if feat_idx is not None else x_train
-    x_val_eval = x_val[:, feat_idx] if feat_idx is not None else x_val
-    it = gbm.best_iteration if gbm.best_iteration is not None else -1
-    prob_val_lgb = gbm.predict(x_val_eval, num_iteration=it)
-    prob_train_lgb = gbm.predict(x_train_eval, num_iteration=it)
+    cat_model = _train_catboost(x_train, y_train, x_val, y_val, random_state=random_state)
+    if cat_model is None:
+        prob_val_cat = np.zeros_like(prob_val_lgb)
+        prob_train_cat = np.zeros_like(prob_train_lgb)
+        blend_w_lgb, blend_w_cat = 1.0, 0.0
+    else:
+        prob_val_cat = _predict_catboost(cat_model, x_val)
+        prob_train_cat = _predict_catboost(cat_model, x_train)
+        blend_w_lgb, blend_w_cat = 0.5, 0.5
+
+    prob_val_blend = blend_w_lgb * prob_val_lgb + blend_w_cat * prob_val_cat
+    prob_train_blend = blend_w_lgb * prob_train_lgb + blend_w_cat * prob_train_cat
 
     return {
         "auc_lgb": float(roc_auc_score(y_val, prob_val_lgb)),
+        "auc_cat": float(roc_auc_score(y_val, prob_val_cat)) if cat_model is not None else None,
+        "auc_blend": float(roc_auc_score(y_val, prob_val_blend)),
         "auc_lr": auc_lr,
         "mean_cv_lr": mean_cv_lr,
         "std_cv_lr": std_cv_lr,
         "train_auc_lgb": float(roc_auc_score(y_train, prob_train_lgb)),
-        "best_iteration": gbm.best_iteration,
-        "scale_pos_weight": scale_pos_weight,
+        "train_auc_blend": float(roc_auc_score(y_train, prob_train_blend)),
+        "best_iteration": best_it,
         "gbm": gbm,
-        "feature_names": names,
-        "feature_keep_indices": feat_idx,
-        "x_val": x_val_eval,
+        "cat_model": cat_model,
+        "feature_names": list(prep.feature_names_),
+        "feature_keep_indices": None,
+        "x_val": x_val,
         "y_val": y_val,
-        "val_pred": prob_val_lgb,
+        "val_pred": prob_val_blend,
+        "val_pred_lgb": prob_val_lgb,
+        "val_pred_cat": prob_val_cat,
     }
 
 
@@ -211,54 +320,143 @@ def train_kfold_lightgbm_ensemble(
     feature_keep_indices: np.ndarray | None = None,
     n_splits: int = config.N_FOLD_ENSEMBLE,
     random_state: int = config.RANDOM_STATE,
+    ohe_max_categories: int = config.OHE_MAX_CATEGORIES,
+    miss_drop_threshold: float = config.MISS_DROP_THRESHOLD,
+    prune_bottom_frac: float = config.PRUNE_BOTTOM_FRAC,
+    blend_weights: tuple[float, float] = (0.5, 0.5),
 ) -> dict:
-    prep = DesignMatrixPreprocessor(
-        ohe_max_categories=config.OHE_MAX_CATEGORIES, miss_drop_threshold=config.MISS_DROP_THRESHOLD
-    ).fit(merged_train)
-    x_all, y_all = prep.X_train_, prep.y_
-    if feature_keep_indices is not None:
-        x_all = x_all[:, feature_keep_indices]
-        feature_names = [prep.feature_names_[i] for i in feature_keep_indices]
-    else:
-        feature_names = list(prep.feature_names_)
+    prepared_folds, y_all = _prepare_fold_data(
+        merged_train,
+        n_splits=n_splits,
+        random_state=random_state,
+        ohe_max_categories=ohe_max_categories,
+        miss_drop_threshold=miss_drop_threshold,
+    )
+    lgb_totals: dict[str, float] = {}
+    lgb_counts: dict[str, int] = {}
+    cat_totals: dict[str, float] = {}
+    cat_counts: dict[str, int] = {}
 
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    models, oof_pred, fold_val_aucs = [], np.zeros(len(y_all), dtype=np.float64), []
-
-    for tr_idx, va_idx in skf.split(x_all, y_all):
-        x_tr, x_va = x_all[tr_idx], x_all[va_idx]
-        y_tr, y_va = y_all[tr_idx], y_all[va_idx]
-        pos_f, neg_f = (y_tr == 1).sum(), (y_tr == 0).sum()
-        params_f = _lgb_binary_params(neg_f / pos_f if pos_f else 1.0, random_state)
-        dtr = lgb.Dataset(x_tr, label=y_tr)
-        dva = lgb.Dataset(x_va, label=y_va, reference=dtr)
-        gbm_f = lgb.train(
-            params_f,
-            dtr,
-            num_boost_round=5000,
-            valid_sets=[dva],
-            valid_names=["valid"],
-            callbacks=[lgb.early_stopping(stopping_rounds=120), lgb.log_evaluation(period=0)],
+    first_pass = []
+    for fd in prepared_folds:
+        lgb_model = _train_lgb(fd.x_train, fd.y_train, fd.x_valid, fd.y_valid, random_state=random_state)
+        lgb_pred = lgb_model.predict(fd.x_valid, num_iteration=lgb_model.best_iteration)
+        _accumulate_importance(
+            lgb_totals,
+            lgb_counts,
+            fd.feature_names,
+            np.asarray(lgb_model.feature_importance(importance_type="gain"), dtype=float),
         )
-        models.append(gbm_f)
-        p_va = gbm_f.predict(x_va, num_iteration=gbm_f.best_iteration)
-        oof_pred[va_idx] = p_va
-        fold_val_aucs.append(float(roc_auc_score(y_va, p_va)))
+        cat_model = _train_catboost(fd.x_train, fd.y_train, fd.x_valid, fd.y_valid, random_state=random_state)
+        if cat_model is not None:
+            cat_imp = np.asarray(cat_model.get_feature_importance(type="FeatureImportance"), dtype=float)
+            _accumulate_importance(cat_totals, cat_counts, fd.feature_names, cat_imp)
+            cat_pred = _predict_catboost(cat_model, fd.x_valid)
+        else:
+            cat_pred = np.zeros_like(lgb_pred)
+        first_pass.append((fd, lgb_pred, cat_pred))
+
+    selected_names = _select_stable_features(
+        lgb_totals,
+        lgb_counts,
+        cat_totals,
+        cat_counts,
+        prune_bottom_frac=prune_bottom_frac,
+    )
+
+    oof_lgb = np.zeros(len(y_all), dtype=np.float64)
+    oof_cat = np.zeros(len(y_all), dtype=np.float64)
+    oof_blend = np.zeros(len(y_all), dtype=np.float64)
+    fold_models = []
+    fold_metrics = []
+    ensemble_importance_rows = []
+
+    raw_w_lgb, raw_w_cat = blend_weights
+    if CatBoostClassifier is None:
+        raw_w_lgb, raw_w_cat = 1.0, 0.0
+    w_sum = raw_w_lgb + raw_w_cat if (raw_w_lgb + raw_w_cat) > 0 else 1.0
+    w_lgb, w_cat = raw_w_lgb / w_sum, raw_w_cat / w_sum
+
+    for fd, _, _ in first_pass:
+        keep_idx = None
+        names = fd.feature_names
+        x_tr, x_va = fd.x_train, fd.x_valid
+        if feature_keep_indices is not None:
+            keep_idx = feature_keep_indices
+            x_tr, x_va = x_tr[:, keep_idx], x_va[:, keep_idx]
+            names = [names[i] for i in keep_idx]
+        elif selected_names is not None:
+            keep_idx = np.array([i for i, n in enumerate(names) if n in selected_names], dtype=int)
+            if keep_idx.size >= max(20, int(0.25 * len(names))):
+                x_tr, x_va = x_tr[:, keep_idx], x_va[:, keep_idx]
+                names = [names[i] for i in keep_idx]
+            else:
+                keep_idx = None
+
+        lgb_model = _train_lgb(x_tr, fd.y_train, x_va, fd.y_valid, random_state=random_state)
+        pred_lgb = lgb_model.predict(x_va, num_iteration=lgb_model.best_iteration)
+        if CatBoostClassifier is not None:
+            cat_model = _train_catboost(x_tr, fd.y_train, x_va, fd.y_valid, random_state=random_state)
+            pred_cat = _predict_catboost(cat_model, x_va)
+            cat_imp = np.asarray(cat_model.get_feature_importance(type="FeatureImportance"), dtype=float)
+        else:
+            cat_model = None
+            pred_cat = np.zeros_like(pred_lgb)
+            cat_imp = np.zeros(len(names), dtype=float)
+        pred_blend = w_lgb * pred_lgb + w_cat * pred_cat
+
+        va_idx = fd.valid_idx
+        oof_lgb[va_idx] = pred_lgb
+        oof_cat[va_idx] = pred_cat
+        oof_blend[va_idx] = pred_blend
+        fold_metrics.append(
+            {
+                "fold": fd.fold_id,
+                "auc_lgb": float(roc_auc_score(fd.y_valid, pred_lgb)),
+                "auc_cat": float(roc_auc_score(fd.y_valid, pred_cat)) if cat_model is not None else None,
+                "auc_blend": float(roc_auc_score(fd.y_valid, pred_blend)),
+                "n_features": int(x_tr.shape[1]),
+            }
+        )
+        fold_models.append(
+            {
+                "preprocessor": fd.preprocessor,
+                "feature_names": names,
+                "feature_keep_indices": keep_idx,
+                "lgb_model": lgb_model,
+                "cat_model": cat_model,
+            }
+        )
+        lgb_imp = np.asarray(lgb_model.feature_importance(importance_type="gain"), dtype=float)
+        for i, nm in enumerate(names):
+            ensemble_importance_rows.append(
+                {
+                    "feature": nm,
+                    "fold": fd.fold_id,
+                    "lgb_gain": float(lgb_imp[i]),
+                    "cat_importance": float(cat_imp[i]) if i < len(cat_imp) else 0.0,
+                }
+            )
 
     return {
-        "models": models,
-        "preprocessor": prep,
+        "fold_models": fold_models,
+        "blend_weights": {"lgb": float(w_lgb), "cat": float(w_cat)},
         "feature_keep_indices": feature_keep_indices,
-        "feature_names_final": feature_names,
-        "x_all": x_all,
+        "selected_feature_names": sorted(selected_names) if selected_names is not None else None,
+        "feature_names_final": fold_models[0]["feature_names"] if fold_models else [],
         "y_all": y_all,
-        "oof_auc": float(roc_auc_score(y_all, oof_pred)),
-        "fold_val_aucs": fold_val_aucs,
+        "oof_pred_lgb": oof_lgb,
+        "oof_pred_cat": oof_cat,
+        "oof_pred_blend": oof_blend,
+        "oof_auc_lgb": float(roc_auc_score(y_all, oof_lgb)),
+        "oof_auc_cat": float(roc_auc_score(y_all, oof_cat)) if CatBoostClassifier is not None else None,
+        "oof_auc_blend": float(roc_auc_score(y_all, oof_blend)),
+        "fold_metrics": fold_metrics,
+        "ensemble_feature_importance": pd.DataFrame(ensemble_importance_rows),
     }
 
 
 __all__ = [
-    "dataframe_to_design_matrix",
     "evaluate_models",
     "run_incremental_table_study",
     "train_kfold_lightgbm_ensemble",

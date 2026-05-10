@@ -1,9 +1,49 @@
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 import pandas as pd
 
 from src.preprocessing import replace_day_sentinel
+
+
+def _downcast_numeric_columns(df: pd.DataFrame, *, key_cols: tuple[str, ...] = ("SK_ID_CURR", "SK_ID_BUREAU")) -> pd.DataFrame:
+    """Reduce merge-time memory pressure by shrinking numeric dtypes."""
+    if df.empty:
+        return df
+    out = df
+    for col in out.columns:
+        if col in key_cols:
+            continue
+        dt = out[col].dtype
+        if pd.api.types.is_float_dtype(dt) and dt == np.float64:
+            out[col] = pd.to_numeric(out[col], downcast="float")
+        elif pd.api.types.is_integer_dtype(dt) and dt in (np.int64, np.uint64):
+            out[col] = pd.to_numeric(out[col], downcast="integer")
+    return out
+
+
+def _merge_left_on_curr(out: pd.DataFrame, agg: pd.DataFrame | None) -> pd.DataFrame:
+    if agg is None or agg.empty or "SK_ID_CURR" not in agg.columns:
+        return out
+    agg = _downcast_numeric_columns(agg)
+    agg = agg.drop_duplicates(subset=["SK_ID_CURR"], keep="first")
+    agg_indexed = agg.set_index("SK_ID_CURR", drop=True)
+    feature_cols = list(agg_indexed.columns)
+    # Join in small batches to avoid a giant temporary concat block.
+    batch_size = 32
+    for start in range(0, len(feature_cols), batch_size):
+        batch_cols = feature_cols[start : start + batch_size]
+        overlap = [c for c in batch_cols if c in out.columns]
+        if overlap:
+            batch_cols = [c for c in batch_cols if c not in overlap]
+        if not batch_cols:
+            continue
+        out = out.join(agg_indexed[batch_cols], on="SK_ID_CURR", how="left")
+        out = _downcast_numeric_columns(out)
+        gc.collect()
+    return out
 
 
 def _months_recent_mask(months_balance: pd.Series, last_n: int) -> pd.Series:
@@ -18,7 +58,9 @@ def aggregate_bureau_balance(bureau_balance: pd.DataFrame) -> pd.DataFrame:
     if "MONTHS_BALANCE" in bb.columns:
         bb["MONTHS_BALANCE_NEG"] = -bb["MONTHS_BALANCE"]
     if "STATUS" in bb.columns:
-        bb["STATUS_NUM"] = pd.to_numeric(bb["STATUS"], errors="coerce")
+        bb["STATUS_NUM"] = pd.to_numeric(bb["STATUS"], errors="coerce").fillna(0)
+        bb["BB_IS_DELINQ"] = (bb["STATUS_NUM"] > 0).astype(np.int8)
+        bb["BB_IS_SEVERE_DELINQ"] = (bb["STATUS_NUM"] >= 3).astype(np.int8)
 
     num_cols = [c for c in bb.select_dtypes(include=[np.number]).columns if c != "SK_ID_BUREAU"]
     if num_cols:
@@ -30,7 +72,8 @@ def aggregate_bureau_balance(bureau_balance: pd.DataFrame) -> pd.DataFrame:
         g_base = pd.DataFrame({"SK_ID_BUREAU": bb["SK_ID_BUREAU"].unique()})
 
     extra_rows = []
-    for bid, gx in bb.groupby("SK_ID_BUREAU"):
+    group_obj = bb.groupby("SK_ID_BUREAU", sort=False)
+    for bid, gx in group_obj:
         er = {"SK_ID_BUREAU": bid}
         mb = gx["MONTHS_BALANCE"] if "MONTHS_BALANCE" in gx.columns else None
         if mb is not None and len(gx):
@@ -45,21 +88,50 @@ def aggregate_bureau_balance(bureau_balance: pd.DataFrame) -> pd.DataFrame:
         else:
             er["BB_RECENCY_WMEAN_STATUS"] = np.nan
 
+        if "STATUS_NUM" in gx.columns:
+            status = gx["STATUS_NUM"].fillna(0).to_numpy(dtype=float, copy=False)
+            er["BB_WORST_DELINQ_STATUS"] = float(np.max(status)) if len(status) else 0.0
+            severe = (status >= 3).astype(np.float32)
+            er["BB_SEVERE_DELINQ_FREQ"] = float(np.mean(severe)) if len(severe) else 0.0
+        else:
+            er["BB_WORST_DELINQ_STATUS"] = np.nan
+            er["BB_SEVERE_DELINQ_FREQ"] = np.nan
+
+        if mb is not None and "STATUS_NUM" in gx.columns and len(gx):
+            gt = gx[["MONTHS_BALANCE", "STATUS_NUM"]].sort_values("MONTHS_BALANCE", ascending=False)
+            flags = (gt["STATUS_NUM"].fillna(0).to_numpy() > 0).astype(np.int8)
+            # Longest contiguous delinquency run across ordered months.
+            if flags.size:
+                best, cur = 0, 0
+                for f in flags:
+                    cur = cur + 1 if f else 0
+                    if cur > best:
+                        best = cur
+                er["BB_MAX_DELINQ_STREAK"] = int(best)
+            else:
+                er["BB_MAX_DELINQ_STREAK"] = 0
+        else:
+            er["BB_MAX_DELINQ_STREAK"] = np.nan
+
         for wm in (3, 6, 12, 13):
             pre = f"BB_W{wm}_"
             if mb is None:
                 er[f"{pre}CNT"] = 0
                 er[f"{pre}STATUS_MEAN"] = np.nan
                 er[f"{pre}DELINQ_SHARE"] = np.nan
+                er[f"{pre}SEVERE_DELINQ_SHARE"] = np.nan
                 continue
             sub = gx.loc[_months_recent_mask(mb, wm)]
             er[f"{pre}CNT"] = int(len(sub))
             if len(sub) and "STATUS_NUM" in sub.columns:
                 er[f"{pre}STATUS_MEAN"] = float(sub["STATUS_NUM"].mean())
-                er[f"{pre}DELINQ_SHARE"] = float((sub["STATUS_NUM"].fillna(0) > 1).mean())
+                st = sub["STATUS_NUM"].fillna(0)
+                er[f"{pre}DELINQ_SHARE"] = float((st > 1).mean())
+                er[f"{pre}SEVERE_DELINQ_SHARE"] = float((st >= 3).mean())
             else:
                 er[f"{pre}STATUS_MEAN"] = np.nan
                 er[f"{pre}DELINQ_SHARE"] = np.nan
+                er[f"{pre}SEVERE_DELINQ_SHARE"] = np.nan
         extra_rows.append(er)
 
     extra_df = pd.DataFrame(extra_rows)
@@ -73,7 +145,7 @@ def aggregate_bureau(bureau: pd.DataFrame, bb_per_bureau: pd.DataFrame | None) -
 
     num_for_agg = [c for c in bu.select_dtypes(include=[np.number]).columns if c not in ("SK_ID_CURR", "SK_ID_BUREAU")]
     agg_dict = {c: ["mean", "max", "min", "sum", "count", "std"] for c in num_for_agg}
-    g = bu.groupby("SK_ID_CURR").agg(agg_dict)
+    g = bu.groupby("SK_ID_CURR").agg(agg_dict).copy()
     g.columns = ["BURO_" + "_".join(col).strip() for col in g.columns.values]
     g = g.reset_index()
 
@@ -272,30 +344,25 @@ def merge_stage(
     pos_cash_balance: pd.DataFrame | None = None,
     credit_card_balance: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    out = app.copy()
+    out = _downcast_numeric_columns(app.copy())
     if stage in ("app", "application"):
         return out
 
     if stage in ("bureau", "previous", "installments", "pos_cash", "credit_card", "full"):
         bb_agg = aggregate_bureau_balance(bureau_balance) if bureau_balance is not None else None
         bu_agg = aggregate_bureau(bureau, bb_agg) if bureau is not None else None
-        if bu_agg is not None:
-            out = out.merge(bu_agg, on="SK_ID_CURR", how="left")
+        out = _merge_left_on_curr(out, bu_agg)
     if stage in ("previous", "installments", "pos_cash", "credit_card", "full"):
         prev_agg = aggregate_previous_application(previous_application) if previous_application is not None else None
-        if prev_agg is not None:
-            out = out.merge(prev_agg, on="SK_ID_CURR", how="left")
+        out = _merge_left_on_curr(out, prev_agg)
     if stage in ("installments", "pos_cash", "credit_card", "full"):
         ins_agg = aggregate_installments(installments_payments) if installments_payments is not None else None
-        if ins_agg is not None:
-            out = out.merge(ins_agg, on="SK_ID_CURR", how="left")
+        out = _merge_left_on_curr(out, ins_agg)
     if stage in ("pos_cash", "credit_card", "full"):
         pos_agg = aggregate_pos_cash(pos_cash_balance) if pos_cash_balance is not None else None
-        if pos_agg is not None:
-            out = out.merge(pos_agg, on="SK_ID_CURR", how="left")
+        out = _merge_left_on_curr(out, pos_agg)
     if stage in ("credit_card", "full"):
         cc_agg = aggregate_credit_card(credit_card_balance) if credit_card_balance is not None else None
-        if cc_agg is not None:
-            out = out.merge(cc_agg, on="SK_ID_CURR", how="left")
+        out = _merge_left_on_curr(out, cc_agg)
     return out
 
