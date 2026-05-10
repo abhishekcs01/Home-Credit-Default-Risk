@@ -94,9 +94,11 @@ class DesignMatrixPreprocessor:
         return features
 
     def _align_feature_columns(self, features: pd.DataFrame) -> pd.DataFrame:
-        for col in self.raw_columns_:
-            if col not in features.columns:
-                features[col] = np.nan
+        # Add all missing columns in one shot to avoid pandas fragmentation (loop insert is O(n²) warnings + huge slowdown).
+        missing = [col for col in self.raw_columns_ if col not in features.columns]
+        if missing:
+            additions = pd.DataFrame(np.nan, index=features.index, columns=missing)
+            features = pd.concat([features, additions], axis=1)
         drop_extra = [c for c in features.columns if c not in self.raw_columns_]
         if drop_extra:
             features = features.drop(columns=drop_extra)

@@ -1,4 +1,4 @@
-.PHONY: train api test load-test locust-ui clean smoke all pipeline
+.PHONY: train api test locust locust-ui clean smoke all pipeline
 
 train:
 	python scripts/preprocess_data.py
@@ -10,11 +10,8 @@ api:
 test:
 	python -m pytest -q
 
-load-test:
-	bash scripts/run_load_test.sh
-
-locust-ui:
-	python scripts/run_locust_ui.py
+locust locust-ui:
+	python scripts/load/run_locust.py
 
 smoke:
 	bash scripts/smoke_test_api.sh
@@ -25,7 +22,7 @@ clean:
 	python -c "from pathlib import Path; [p.unlink() for p in Path('.').rglob('*.pyc')]"
 
 all:
-	python scripts/run_all.py
+	python scripts/pipeline/run_all.py
 
 pipeline:
-	python scripts/run_pipeline.py
+	python scripts/pipeline/run_pipeline.py

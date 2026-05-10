@@ -1,13 +1,17 @@
 api:
   title: "Home Credit Default Risk Inference API"
   version: "1.0.0"
+  # Bind address for uvicorn/Docker; Locust target defaults to http://127.0.0.1:{port} unless load_test.host is set.
   host: "0.0.0.0"
   port: 8000
-  workers: 1
+  # Uvicorn worker processes; each loads the model (higher throughput, more RAM). Use 1 for dev if needed.
+  workers: 4
   startup_load_model: true
+  # JSON request body limit (Content-Length) for POST /predict
+  max_request_body_bytes: 6291456
 
 model:
-  bundle_path: "models/lightgbm_model.pkl"
+  bundle_path: "models/ensemble_model.pkl"
 
 logging:
   level: "INFO"
@@ -15,12 +19,12 @@ logging:
   logger_name: "home_credit.api"
 
 load_test:
-  host: "http://127.0.0.1:8000"
+  # Omit host to use http://127.0.0.1:{api.port}. Override with HOME_CREDIT_LOAD_HOST or add host: here.
   users: 25
   spawn_rate: 5
   run_time: "2m"
   min_wait_seconds: 0.2
   max_wait_seconds: 1.0
-  # Locust web UI (scripts/run_locust_ui.py) — not used for headless runs
+  # Locust web UI bind (`python scripts/load/run_locust.py`)
   locust_web_host: "127.0.0.1"
   locust_web_port: 8089

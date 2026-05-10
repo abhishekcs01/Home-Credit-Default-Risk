@@ -1,3 +1,7 @@
+# Load testing: use Locust web UI on your machine (not in this file):
+#   docker compose up --build api
+#   python scripts/load/run_locust.py --target-host http://127.0.0.1:8000
+
 version: "3.9"
 
 services:
@@ -9,30 +13,11 @@ services:
     environment:
       HOME_CREDIT_API_HOST: "0.0.0.0"
       HOME_CREDIT_API_PORT: "8000"
-      HOME_CREDIT_API_WORKERS: "1"
+      HOME_CREDIT_API_WORKERS: "4"
+      HOME_CREDIT_INFERENCE_FOLD_WORKERS: "auto"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
     volumes:
       - ./models:/app/models:ro
       - ./configs:/app/configs:ro
-
-  locust:
-    build: .
-    container_name: home-credit-locust
-    depends_on:
-      - api
-    command:
-      [
-        "locust",
-        "-f",
-        "tests/load/locustfile.py",
-        "--host",
-        "http://api:8000",
-        "--headless",
-        "--users",
-        "25",
-        "--spawn-rate",
-        "5",
-        "--run-time",
-        "2m"
-      ]
-    volumes:
-      - ./examples:/app/examples:ro

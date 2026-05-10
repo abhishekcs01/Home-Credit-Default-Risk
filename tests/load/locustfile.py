@@ -14,6 +14,9 @@ PAYLOAD_DIR = PROJECT_ROOT / "examples" / "payloads"
 _settings = load_runtime_settings()
 _min_wait = float(os.getenv("HOME_CREDIT_LOAD_MIN_WAIT_SECONDS", _settings.load_test.min_wait_seconds))
 _max_wait = float(os.getenv("HOME_CREDIT_LOAD_MAX_WAIT_SECONDS", _settings.load_test.max_wait_seconds))
+_connect_timeout = float(os.getenv("HOME_CREDIT_LOAD_CONNECT_TIMEOUT_SECONDS", "10"))
+_read_timeout = float(os.getenv("HOME_CREDIT_LOAD_READ_TIMEOUT_SECONDS", "180"))
+_REQUEST_TIMEOUT = (_connect_timeout, _read_timeout)
 
 
 def _load_json(path: Path) -> dict:
@@ -32,18 +35,36 @@ class HomeCreditInferenceUser(HttpUser):
 
     @task(5)
     def predict_minimal(self):
-        with self.client.post("/predict", json=MINIMAL_PAYLOAD, name="predict_minimal", catch_response=True) as resp:
+        with self.client.post(
+            "/predict",
+            json=MINIMAL_PAYLOAD,
+            name="predict_minimal",
+            catch_response=True,
+            timeout=_REQUEST_TIMEOUT,
+        ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"status={resp.status_code}, body={resp.text}")
 
     @task(2)
     def predict_full(self):
-        with self.client.post("/predict", json=FULL_PAYLOAD, name="predict_full", catch_response=True) as resp:
+        with self.client.post(
+            "/predict",
+            json=FULL_PAYLOAD,
+            name="predict_full",
+            catch_response=True,
+            timeout=_REQUEST_TIMEOUT,
+        ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"status={resp.status_code}, body={resp.text}")
 
     @task(1)
     def predict_batch(self):
-        with self.client.post("/predict", json=BATCH_PAYLOAD, name="predict_batch", catch_response=True) as resp:
+        with self.client.post(
+            "/predict",
+            json=BATCH_PAYLOAD,
+            name="predict_batch",
+            catch_response=True,
+            timeout=_REQUEST_TIMEOUT,
+        ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"status={resp.status_code}, body={resp.text}")

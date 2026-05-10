@@ -1,6 +1,7 @@
-"""Compatibility layer: exposes repo-root ``config`` for ``from src import config``.
+"""Thin compatibility layer: re-exports the repo-root ``config`` module.
 
-Keeping imports stable for notebooks and tests while the canonical paths live in ``config.py``.
+Use ``from src import config`` in ``src/``, tests, and notebooks. All path and hyperparameter
+constants are defined once in ``config.py`` at the project root; this file does not duplicate them.
 """
 from __future__ import annotations
 

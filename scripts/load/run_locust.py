@@ -1,4 +1,4 @@
-"""Start Locust with the web UI (not headless). Target API must already be running."""
+"""Start Locust web UI for load testing (interactive only — start the API in another terminal first)."""
 
 from __future__ import annotations
 
@@ -9,40 +9,33 @@ import sys
 import webbrowser
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.runtime_config import load_runtime_settings  # noqa: E402
 
 
+def _locustfile() -> Path:
+    path = PROJECT_ROOT / "tests" / "load" / "locustfile.py"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing Locust file: {path}")
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Open Locust web UI to drive load tests against the inference API.",
+        description="Locust web UI for the inference API (see README: Load Testing).",
     )
     parser.add_argument(
         "--target-host",
         type=str,
         default=None,
-        help="API base URL for Locust (default: load_test.host from configs/config.yaml or HOME_CREDIT_LOAD_HOST).",
+        help="API base URL for Locust (default: config / HOME_CREDIT_LOAD_HOST).",
     )
-    parser.add_argument(
-        "--web-host",
-        type=str,
-        default=None,
-        help="Bind address for Locust UI (default: config load_test.locust_web_host).",
-    )
-    parser.add_argument(
-        "--web-port",
-        type=int,
-        default=None,
-        help="Port for Locust UI (default: config load_test.locust_web_port, usually 8089).",
-    )
-    parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Do not open a browser tab automatically.",
-    )
+    parser.add_argument("--web-host", type=str, default=None, help="Bind address for Locust UI.")
+    parser.add_argument("--web-port", type=int, default=None, help="Locust UI port (default from config, usually 8089).")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open a browser tab.")
     args = parser.parse_args()
 
     settings = load_runtime_settings()
@@ -51,14 +44,13 @@ def main() -> None:
     web_host = args.web_host or lt.locust_web_host
     web_port = args.web_port if args.web_port is not None else lt.locust_web_port
 
-    locustfile = PROJECT_ROOT / "tests" / "load" / "locustfile.py"
-    if not locustfile.is_file():
-        raise FileNotFoundError(f"Missing {locustfile}")
-
     ui_url = f"http://{web_host if web_host != '0.0.0.0' else '127.0.0.1'}:{web_port}"
+    api_port = settings.api.port
     print(f"Locust UI: {ui_url}")
     print(f"Target API (--host): {target}")
-    print("Ensure the API is running (e.g. python -m uvicorn app.main:app --host 127.0.0.1 --port 8000).")
+    print(
+        f"Ensure the API is running (e.g. python -m uvicorn app.main:app --host 127.0.0.1 --port {api_port}).",
+    )
     print()
 
     if not args.no_browser:
@@ -72,7 +64,7 @@ def main() -> None:
         "-m",
         "locust",
         "-f",
-        str(locustfile),
+        str(_locustfile()),
         "--host",
         target,
         "--web-host",
@@ -81,7 +73,7 @@ def main() -> None:
         str(web_port),
     ]
     os.chdir(PROJECT_ROOT)
-    subprocess.run(cmd, check=False)
+    raise SystemExit(subprocess.run(cmd, check=False).returncode)
 
 
 if __name__ == "__main__":

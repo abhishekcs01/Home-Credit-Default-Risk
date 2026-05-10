@@ -46,8 +46,8 @@ MERGED_TEST_PATH = PROCESSED_DATA_DIR / "merged_test.pkl"
 MERGED_TRAIN_CSV_PATH = PROCESSED_DATA_DIR / "merged_train.csv"
 MERGED_TEST_CSV_PATH = PROCESSED_DATA_DIR / "merged_test.csv"
 
-# Training outputs
-MODEL_BUNDLE_PATH = MODELS_DIR / "lightgbm_model.pkl"
+# Training outputs (fold ensemble: LightGBM + optional CatBoost blend; single pickle bundle)
+MODEL_BUNDLE_PATH = MODELS_DIR / "ensemble_model.pkl"
 ROC_CURVE_PATH = FIGURES_DIR / "roc_curve.png"
 PR_CURVE_PATH = FIGURES_DIR / "pr_curve.png"
 FEATURE_IMPORTANCE_PATH = FIGURES_DIR / "feature_importance.png"

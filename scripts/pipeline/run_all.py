@@ -1,4 +1,4 @@
-"""Single entry point: ML pipeline → temporary API → smoke test → optional Locust load test."""
+"""Single entry point: ML pipeline → temporary API → smoke test."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -22,7 +22,7 @@ from src.utils import get_logger, init_logging  # noqa: E402
 
 
 def _load_run_pipeline():
-    path = PROJECT_ROOT / "scripts" / "run_pipeline.py"
+    path = PROJECT_ROOT / "scripts" / "pipeline" / "run_pipeline.py"
     spec = importlib.util.spec_from_file_location("pipeline_run_module", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load {path}")
@@ -66,30 +66,6 @@ def _smoke_predict(base_url: str, payload_path: Path, log) -> None:
     log.info("Smoke POST /predict OK (%d prediction row(s))", len(data.get("predictions", [])))
 
 
-def _run_locust(base_url: str, *, users: int, spawn_rate: int, run_time: str, log) -> None:
-    locustfile = PROJECT_ROOT / "tests" / "load" / "locustfile.py"
-    if not locustfile.is_file():
-        raise FileNotFoundError(f"Missing Locust file: {locustfile}")
-    cmd = [
-        sys.executable,
-        "-m",
-        "locust",
-        "-f",
-        str(locustfile),
-        "--host",
-        base_url.rstrip("/"),
-        "--headless",
-        "--users",
-        str(users),
-        "--spawn-rate",
-        str(spawn_rate),
-        "--run-time",
-        run_time,
-    ]
-    log.info("Running Locust: %s", " ".join(cmd))
-    subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
-
-
 def run_full_stack(
     *,
     optimize_memory: bool,
@@ -99,11 +75,7 @@ def run_full_stack(
     timestamped_submission_copy: bool,
     log_file: Path | None,
     pipeline_only: bool,
-    skip_load_test: bool,
     api_startup_timeout_sec: float,
-    load_users: int,
-    load_spawn_rate: int,
-    load_run_time: str,
 ) -> None:
     init_logging(log_file)
     log = get_logger("run_all")
@@ -119,7 +91,7 @@ def run_full_stack(
     )
 
     if pipeline_only:
-        log.info("Pipeline-only mode: skipping API, smoke, and load test.")
+        log.info("Pipeline-only mode: skipping API and smoke test.")
         return
 
     settings = load_runtime_settings()
@@ -153,15 +125,10 @@ def run_full_stack(
     try:
         _wait_for_health(base_url, timeout_sec=api_startup_timeout_sec, log=log)
         _smoke_predict(base_url, payload_path, log=log)
-        if not skip_load_test:
-            _run_locust(
-                base_url,
-                users=load_users,
-                spawn_rate=load_spawn_rate,
-                run_time=load_run_time,
-                log=log,
-            )
-        log.info("Full stack finished successfully.")
+        log.info(
+            "Full stack finished successfully. Load testing: start the API separately and run "
+            "`python scripts/load/run_locust.py` for the Locust web UI.",
+        )
     finally:
         proc.terminate()
         try:
@@ -173,7 +140,7 @@ def run_full_stack(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run preprocess → train → submission, then API smoke (+ optional Locust) in one command.",
+        description="Run preprocess → train → submission, then temporary API + smoke test.",
     )
     p.add_argument("--no-memory-opt", action="store_true", help="Disable memory optimization when loading raw CSVs.")
     p.add_argument("--export-csv", action="store_true", help="Also export merged_train.csv / merged_test.csv.")
@@ -184,18 +151,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--pipeline-only",
         action="store_true",
-        help="Only run ML pipeline (preprocess → train → submission); skip API and tests.",
+        help="Only run ML pipeline (preprocess → train → submission); skip API and smoke.",
     )
-    p.add_argument("--skip-load-test", action="store_true", help="After smoke test, skip Locust.")
     p.add_argument(
         "--api-startup-timeout",
         type=float,
         default=300.0,
         help="Seconds to wait for /health after starting uvicorn (model load can be slow).",
     )
-    p.add_argument("--load-users", type=int, default=5, help="Locust users (default: small quick run).")
-    p.add_argument("--load-spawn-rate", type=int, default=2, help="Locust spawn rate.")
-    p.add_argument("--load-run-time", type=str, default="30s", help="Locust headless run time (e.g. 30s, 2m).")
     return p.parse_args()
 
 
@@ -211,11 +174,7 @@ def main() -> None:
         timestamped_submission_copy=not args.no_timestamp_copy,
         log_file=log_path,
         pipeline_only=args.pipeline_only,
-        skip_load_test=args.skip_load_test,
         api_startup_timeout_sec=args.api_startup_timeout,
-        load_users=args.load_users,
-        load_spawn_rate=args.load_spawn_rate,
-        load_run_time=args.load_run_time,
     )
 
 

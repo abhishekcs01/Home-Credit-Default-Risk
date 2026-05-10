@@ -37,3 +37,5 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_path: str
+    inference_ready: bool = False
+    bundle_path_exists: bool = False
