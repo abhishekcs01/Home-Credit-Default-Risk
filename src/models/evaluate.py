@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn.metrics import PrecisionRecallDisplay, RocCurveDisplay
+
+from src import config
+from src.utils import ensure_dir, get_logger, init_logging, load_pickle
+
+LOGGER = get_logger("evaluate")
+
+
+def plot_roc_curve(y_true, y_score, output_path=config.ROC_CURVE_PATH, model_name: str = "OOF blended ensemble"):
+    ensure_dir(output_path.parent)
+    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    RocCurveDisplay.from_predictions(y_true, y_score, ax=ax, name=model_name)
+    ax.set_title("ROC Curve")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=140)
+    return fig
+
+
+def plot_pr_curve(y_true, y_score, output_path=config.PR_CURVE_PATH, model_name: str = "OOF blended ensemble"):
+    ensure_dir(output_path.parent)
+    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    PrecisionRecallDisplay.from_predictions(y_true, y_score, ax=ax, name=model_name)
+    ax.set_title("Precision-Recall Curve")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=140)
+    return fig
+
+
+def feature_bucket(name: str) -> str:
+    s = str(name).upper()
+    if any(p in s for p in ("BURO_", "PREV_", "INST_", "POS_", "CC_", "BB_")):
+        return "Subsidiary aggregates"
+    if "EXT_SOURCE" in s or s.startswith("EXT_"):
+        return "External scores"
+    if any(k in s for k in ("AGE_YEARS", "EMPLOYMENT_", "DAYS_BIRTH", "DAYS_EMPLOYED")):
+        return "Time-based"
+    if any(k in s for k in ("RATIO", "CREDIT_INCOME", "ANNUITY_INCOME", "ANNUITY_CREDIT", "CHILDREN_RATIO")):
+        return "Ratios"
+    if any(k in s for k in ("AMT_", "INCOME", "ANNUITY", "GOODS_PRICE", "CREDIT")) and "RATIO" not in s:
+        return "Capacity"
+    return "Other"
+
+
+def _prepare_importance_table(importance: pd.Series, top_n: int) -> pd.DataFrame:
+    top = (
+        importance.sort_values(ascending=False)
+        .head(top_n)
+        .rename("gain")
+        .reset_index()
+        .rename(columns={"index": "feature"})
+    )
+    top["category"] = top["feature"].map(feature_bucket)
+    return top
+
+
+def plot_feature_importance(
+    model, feature_names: list[str], top_n: int = 15, output_path=config.FEATURE_IMPORTANCE_PATH
+):
+    ensure_dir(output_path.parent)
+    importance = pd.Series(model.feature_importance(importance_type="gain"), index=feature_names).sort_values(
+        ascending=False
+    )
+    top = _prepare_importance_table(importance, top_n=top_n)
+    plot_df = top.iloc[::-1].reset_index(drop=True)
+    palette = {
+        "Subsidiary aggregates": "#1B4332",
+        "External scores": "#2E86AB",
+        "Ratios": "#A23B72",
+        "Time-based": "#F18F01",
+        "Capacity": "#6A994E",
+        "Other": "#888888",
+    }
+    colors = plot_df["category"].map(lambda x: palette.get(x, "#888888"))
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.barh(plot_df["feature"], plot_df["gain"], color=colors, edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Gain")
+    ax.set_title("Top Feature Importance (LightGBM)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=140)
+    return fig, top
+
+
+def plot_ensemble_feature_importance(
+    fold_importance: pd.DataFrame,
+    *,
+    top_n: int = 15,
+    output_path=config.FEATURE_IMPORTANCE_PATH,
+) -> tuple[plt.Figure, pd.DataFrame]:
+    ensure_dir(output_path.parent)
+    if fold_importance.empty:
+        raise ValueError("fold_importance table is empty.")
+    grouped = (
+        fold_importance.assign(ensemble_gain=0.7 * fold_importance["lgb_gain"] + 0.3 * fold_importance["cat_importance"])
+        .groupby("feature", as_index=True)["ensemble_gain"]
+        .mean()
+    )
+    top = _prepare_importance_table(grouped, top_n=top_n).rename(columns={"gain": "ensemble_gain"})
+    plot_df = top.iloc[::-1].reset_index(drop=True)
+
+    palette = {
+        "Subsidiary aggregates": "#1B4332",
+        "External scores": "#2E86AB",
+        "Ratios": "#A23B72",
+        "Time-based": "#F18F01",
+        "Capacity": "#6A994E",
+        "Other": "#888888",
+    }
+    colors = plot_df["category"].map(lambda x: palette.get(x, "#888888"))
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.barh(plot_df["feature"], plot_df["ensemble_gain"], color=colors, edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Mean Ensemble Gain")
+    ax.set_title("Top Feature Importance (Ensemble)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=140)
+    return fig, top
+
+
+def _extract_eval_fields(bundle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "metrics": bundle.get("metrics", {}),
+        "threshold": bundle.get("threshold"),
+        "version": bundle.get("version"),
+        "schema_version": bundle.get("schema_version"),
+        "trained_at": bundle.get("trained_at"),
+        "feature_count": len(bundle.get("feature_names", [])),
+    }
+
+
+def run_evaluation(output_path: Path | None = None) -> Path:
+    if not config.MODEL_BUNDLE_PATH.exists():
+        raise FileNotFoundError(f"Missing model bundle at {config.MODEL_BUNDLE_PATH}")
+    bundle = load_pickle(config.MODEL_BUNDLE_PATH)
+    active = bundle.get("model", bundle)
+    def _rel(path: Path) -> str:
+        try:
+            return str(path.relative_to(config.PROJECT_ROOT))
+        except ValueError:
+            return str(path)
+
+    report = {
+        "evaluated_at": datetime.now(UTC).isoformat(),
+        "bundle_path": _rel(config.MODEL_BUNDLE_PATH),
+        **_extract_eval_fields(bundle),
+        "calibration_method": active.get("calibration_method") or bundle.get("calibration_method"),
+        "calibration_report": bundle.get("calibration_report"),
+        "blend_weights": bundle.get("metrics", {}).get("blend_weights"),
+        "fold_metrics_path": _rel(config.FOLD_METRICS_CSV_PATH),
+        "reports_index": _rel(config.REPORTS_DIR / "index.json"),
+    }
+    ensure_dir(config.REPORTS_DIR)
+    target_path = output_path or (config.REPORTS_DIR / "evaluation_report.json")
+    target_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    LOGGER.info("Evaluation report saved to %s", target_path)
+    return target_path
+
+
+def main() -> None:
+    init_logging()
+    run_evaluation()
+
+
+if __name__ == "__main__":
+    main()

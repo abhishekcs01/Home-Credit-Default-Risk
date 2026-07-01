@@ -5,16 +5,20 @@ import gc
 import sys
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import config
-from src.aggregation import merge_stage
-from src.data_loading import load_application_test, load_application_train, load_auxiliary_tables
-from src.feature_engineering import engineer_application_features
-from src.preprocessing import replace_day_sentinel
+from src.data.aggregation import merge_stage
+from src.data.load_data import (
+    load_application_test,
+    load_application_train,
+    load_auxiliary_tables,
+    using_synthetic_data,
+)
+from src.data.preprocess import replace_day_sentinel
+from src.features.build_features import engineer_application_features
 from src.utils import ensure_dir, get_logger, init_logging, timer
 
 
@@ -25,6 +29,10 @@ def run_preprocessing(
     use_cache: bool = True,
 ) -> tuple[Path, Path]:
     logger = get_logger("preprocess")
+    if using_synthetic_data():
+        logger.warning(
+            "Raw Kaggle CSVs are missing; generating synthetic sample tables for preprocessing."
+        )
     if use_cache and config.MERGED_TRAIN_PATH.exists() and config.MERGED_TEST_PATH.exists():
         logger.info("Using cached merged datasets from data/processed (skip recomputation).")
         return config.MERGED_TRAIN_PATH, config.MERGED_TEST_PATH
@@ -33,7 +41,10 @@ def run_preprocessing(
         logger.info("Loading raw training data")
         train_df = load_application_train(optimize_memory=optimize_memory)
         logger.info("Loading auxiliary tables for train split")
-        aux_tables = load_auxiliary_tables(optimize_memory=optimize_memory)
+        aux_tables = load_auxiliary_tables(
+            optimize_memory=optimize_memory,
+            sk_ids=train_df["SK_ID_CURR"],
+        )
 
     train_df = replace_day_sentinel(train_df, [c for c in train_df.columns if "DAYS" in c.upper()])
 
@@ -55,9 +66,10 @@ def run_preprocessing(
         logger.info("Loading raw test data")
         test_df = load_application_test(optimize_memory=optimize_memory)
         logger.info("Loading auxiliary tables for test split")
-        aux_tables = load_auxiliary_tables(optimize_memory=optimize_memory)
-
-    test_df = replace_day_sentinel(test_df, [c for c in test_df.columns if "DAYS" in c.upper()])
+        aux_tables = load_auxiliary_tables(
+            optimize_memory=optimize_memory,
+            sk_ids=test_df["SK_ID_CURR"],
+        )
 
     with timer("Aggregate + feature engineering (test)"):
         logger.info("Running full-stage aggregation and feature engineering for test split")

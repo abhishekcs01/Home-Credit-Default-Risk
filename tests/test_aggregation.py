@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.aggregation import _downcast_numeric_columns, aggregate_bureau, aggregate_bureau_balance, merge_stage
+from src.data.aggregation import _downcast_numeric_columns, aggregate_bureau, aggregate_bureau_balance, merge_stage
 
 
 def test_bureau_aggregation_returns_sk_id_curr():
@@ -68,4 +68,3 @@ def test_downcast_numeric_columns_shrinks_64bit_types():
     out = _downcast_numeric_columns(frame.copy())
     assert str(out["F64"].dtype) == "float32"
     assert str(out["I64"].dtype) in {"int8", "int16", "int32"}
-

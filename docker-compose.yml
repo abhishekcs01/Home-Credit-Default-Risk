@@ -1,23 +1,9 @@
-# Load testing: use Locust web UI on your machine (not in this file):
-#   docker compose up --build api
-#   python scripts/load/run_locust.py --target-host http://127.0.0.1:8000
-
-version: "3.9"
-
 services:
-  api:
+  abhishek-ml-project:
     build: .
-    container_name: home-credit-api
+    image: abhishek-ml-project
+    container_name: abhishek-ml-project
     ports:
       - "8000:8000"
-    environment:
-      HOME_CREDIT_API_HOST: "0.0.0.0"
-      HOME_CREDIT_API_PORT: "8000"
-      HOME_CREDIT_API_WORKERS: "4"
-      HOME_CREDIT_INFERENCE_FOLD_WORKERS: "auto"
-      OMP_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
     volumes:
-      - ./models:/app/models:ro
-      - ./configs:/app/configs:ro
+      - ./artifacts:/app/artifacts:ro

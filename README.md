@@ -1,203 +1,303 @@
 # Home Credit Default Risk
 
-Modular, script-driven ML for borrower default risk: table aggregation and feature engineering, **K-fold LightGBM + optional CatBoost** blend, **fold-fitted preprocessors**, **FastAPI** inference, and **Locust (web UI)** load testing. Training and batch scoring write to `outputs/` and `reports/`; the serialized **ensemble bundle** is the single artifact for serving.
+Production-grade machine learning system for the [Kaggle Home Credit Default Risk](https://www.kaggle.com/c/home-credit-default-risk) competition. The project demonstrates end-to-end ML engineering: multi-table feature engineering, stratified ensemble training, calibration, explainability, automated reporting, and a hardened FastAPI inference service.
 
----
+## Review Guide
 
-## Architecture overview
+Start here — all key reports are one click away. Metrics below match `artifacts/metrics/training_metrics.json` (single source of truth).
 
-| Layer | Role |
-|--------|------|
-| **`config.py`** | Canonical paths, hyperparameters, `MODEL_BUNDLE_PATH`. |
-| **`configs/config.yaml`** | API bind, logging, model path override, Locust defaults (loaded by `src.runtime_config`). |
-| **`src/`** | Data loading, preprocessing, aggregation, feature engineering, training, evaluation, **`src.inference`** ensemble prediction. |
-| **`app/`** | FastAPI app: validation, health, `/predict` wrapping **`EnsembleInferenceEngine`**. |
-| **`scripts/`** | Stage scripts + **`pipeline/`** (orchestration) + **`load/`** (Locust UI only). |
-| **`tests/`** | Unit/integration tests; **`tests/load/locustfile.py`** defines Locust scenarios. |
+| Report | Markdown | HTML |
+| --- | --- | --- |
+| **Executive Summary** | [executive_summary.md](artifacts/reports/executive_summary.md) | [executive_summary.html](artifacts/reports/executive_summary.html) |
+| **Model Comparison** | [model_comparison.md](artifacts/reports/model_comparison.md) | [model_comparison.html](artifacts/reports/model_comparison.html) |
+| **SHAP Report** | [shap_report.md](artifacts/reports/shap_report.md) | [shap_report.html](artifacts/reports/shap_report.html) |
+| **Model Card** | [model_card.md](artifacts/reports/model_card.md) | [model_card.html](artifacts/reports/model_card.html) |
+| **Business Insights** | [business_insights.md](artifacts/reports/business_insights.md) | [business_insights.html](artifacts/reports/business_insights.html) |
+| **Defense Preparation** | [defense_prep.md](artifacts/reports/defense_prep.md) | — |
+| Training Summary | [training_summary.md](artifacts/reports/training_summary.md) | [training_summary.html](artifacts/reports/training_summary.html) |
+| Calibration Report | [calibration_report.md](artifacts/reports/calibration_report.md) | [calibration_report.html](artifacts/reports/calibration_report.html) |
+| Feature Ranking | [feature_report.md](artifacts/reports/feature_report.md) | [feature_report.html](artifacts/reports/feature_report.html) |
+| Report index | [index.json](artifacts/reports/index.json) | — |
+| Evaluation snapshot | [evaluation_report.json](artifacts/reports/evaluation_report.json) | — |
 
-**Training flow:** raw CSVs (`data/raw/`) → preprocess → `merged_*.pkl` → K-fold train → **`models/ensemble_model.pkl`** + metrics/plots under `outputs/` and `reports/figures/`.
+## How To Evaluate This Project In 10 Minutes
 
-**Inference flow:** JSON records → Pandas → per-fold preprocessor transform → LightGBM / CatBoost blend → mean across folds → optional probability sanitization → JSON response (`TARGET` in `[0, 1]`).
+1. **Read Executive Summary** — [artifacts/reports/executive_summary.md](artifacts/reports/executive_summary.md) (business problem, key findings, recommended actions).
+2. **Review Results** — OOF metrics table below and [model_comparison.md](artifacts/reports/model_comparison.md).
+3. **Open SHAP Report** — [artifacts/reports/shap_report.md](artifacts/reports/shap_report.md) (global importance and risk direction).
+4. **Review Model Comparison** — [artifacts/reports/model_comparison.md](artifacts/reports/model_comparison.md) (LightGBM vs CatBoost vs stacking vs calibration).
+5. **Run Tests** — `make test` (95%+ coverage gate).
+6. **Review API Example** — `make serve` then `curl -X POST http://127.0.0.1:8000/v1/predict -H "Content-Type: application/json" -d @examples/payloads/minimal_request.json`
 
----
+Optional depth: [defense_prep.md](artifacts/reports/defense_prep.md) (25 trainer Q&A), [model_card.md](artifacts/reports/model_card.md) (intended use and limitations).
 
-## Repository layout
+## Deployed Model
+
+The API and submission pipeline serve the **calibrated stacking ensemble** — not raw LightGBM, not the weighted blend alone.
+
+| Property | Value |
+| --- | --- |
+| **Architecture** | 5-fold stratified CV → per-fold LightGBM + CatBoost → fold-averaged predictions → logistic stacking meta-learner → **isotonic calibration** |
+| **Artifact** | `artifacts/models/ensemble_model.pkl` |
+| **OOF ROC-AUC (deployed)** | **0.7916410756948241** |
+| **Calibration method** | Isotonic regression (selected over Platt scaling by lower Brier score) |
+| **Features** | 723 |
+| **Version** | 1.0.0 |
+
+**Inference path:** For each fold, score with LightGBM and CatBoost using fold-specific preprocessors → average fold predictions → stack with logistic meta-learner → apply isotonic calibrator → return calibrated default probability.
+
+Blend weights (`lgb: 1.0, cat: 0.0`) apply only to intermediate fold predictions before stacking; the deployed output is always the calibrated stack.
+
+## Business Problem
+
+Home Credit Group extends loans to financially excluded populations. The goal is to predict whether an applicant will default on a loan (`TARGET=1`) using application data and behavioral credit history from subsidiary tables. Accurate risk scoring supports underwriting decisions, portfolio monitoring, and loss prevention.
+
+## Results
+
+All values from `artifacts/metrics/training_metrics.json`:
+
+| Model | OOF ROC-AUC |
+| --- | --- |
+| LightGBM | 0.790255159327977 |
+| CatBoost | 0.7894775044564407 |
+| Weighted Blend | 0.790255159327977 |
+| Stacking | 0.7911954612578193 |
+| **Calibrated (deployed)** | **0.7916410756948241** |
+
+Full reports are under `artifacts/reports/` (regenerate with `make reports` after retraining).
+
+## Architecture
 
 ```text
-├── config.py                 # Paths & modeling constants (single source for paths)
-├── configs/config.yaml       # API / logging / model path / load-test defaults
-├── docs/                     # Ancillary documentation (see docs/README.md)
-├── src/
-│   ├── config.py             # Re-exports root config.py
-│   ├── runtime_config.py     # Loads configs/config.yaml + env
-│   └── …                     # ML pipeline & inference
-├── app/                      # FastAPI service
-├── scripts/
-│   ├── pipeline/
-│   │   ├── run_pipeline.py   # preprocess → train → submission
-│   │   └── run_all.py        # pipeline + temp API + smoke test
-│   ├── load/
-│   │   └── run_locust.py     # Locust web UI (interactive load testing)
-│   ├── preprocess_data.py
-│   ├── train_model.py
-│   └── generate_submission.py
-├── tests/
-├── notebooks/                # EDA / walkthroughs
-├── notebooks/archive/        # historical notebooks (e.g. legacy_monolith.ipynb)
-├── examples/payloads/        # Sample API JSON bodies
-├── models/                   # ensemble_model.pkl (gitignored by default)
-├── outputs/                  # submissions/, metrics/, logs/
-├── reports/                  # figures/, final_report.md
-├── docker-compose.yml
-├── Dockerfile
-├── Makefile
-└── README.md
+data/raw/  ──►  preprocess  ──►  data/processed/merged_{train,test}.pkl
+                                        │
+                                        ▼
+                                 train (5-fold CV)
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    ▼                   ▼                   ▼
+           artifacts/models/   artifacts/metrics/   artifacts/reports/
+           ensemble_model.pkl   training_metrics.json
+                                        │
+                                        ▼
+                              FastAPI /v1/predict
 ```
 
----
+### Module Layout
 
-## Configuration (what lives where)
-
-- **`config.py` (root)** — Filesystem layout (`DATA_DIR`, `MODEL_BUNDLE_PATH`, etc.), LightGBM defaults, blend weights, fold count. **Training scripts save the bundle to `MODEL_BUNDLE_PATH`.**
-- **`src/config.py`** — Imports root `config.py` so code can use `from src import config`.
-- **`configs/config.yaml`** — Operational knobs for **inference** (API host/port/workers, bundle path string, logging, Locust-related defaults). Values may be overridden by environment variables (see `src/runtime_config.py`).
-- **`src/runtime_config.py`** — Parses YAML + env into typed settings consumed by **`app/main.py`** and Locust helpers.
-
-No Hydra or duplicate constants beyond the deliberate YAML override of `model.bundle_path` (defaults align with `MODEL_BUNDLE_PATH`).
-
----
+```text
+src/
+├── api/           # FastAPI app, schemas, prediction service
+├── config/        # Typed YAML config loader + path constants
+├── data/          # Loading, aggregation, preprocessing
+├── features/      # Feature engineering, selection, schema
+├── models/        # Train, predict, evaluate, calibration
+├── reporting/     # Automated MD/HTML report generation
+└── utils/         # Logging, serialization, memory optimization
+```
 
 ## Setup
 
+### Conda (recommended)
+
+```bash
+conda create -n abhishek-ml python=3.11 pip -y
+conda activate abhishek-ml
+make install          # core deps; never overwrites an existing LightGBM install
+```
+
+Verify you are using the env interpreter (not system Python):
+
+```bash
+which python pip   # should point to .../envs/abhishek-ml/bin/
+```
+
+### venv (alternative)
+
 ```bash
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Unix:    source .venv/bin/activate
-pip install -r requirements.txt
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+make install
 ```
 
-Place competition CSVs under `data/raw/` before training.
+Place Kaggle CSVs in `data/raw/` (see [data/README.md](data/README.md)). **Without raw data**, the pipeline still runs end-to-end using built-in synthetic sample tables (preprocess → train → API smoke tests auto-bootstrap a demo model).
 
----
+### GPU training (optional)
 
-## Training (pipeline)
+Boosters (LightGBM, CatBoost, XGBoost) use GPU when `training.device` is `auto` or `cuda` and an NVIDIA GPU is present. Set in `configs/config.yaml`:
 
-End-to-end **preprocess → train → submission**:
-
-```bash
-python scripts/pipeline/run_pipeline.py
-# or: make pipeline
+```yaml
+training:
+  device: auto          # auto | cpu | cuda
+  gpu_device_id: 0
 ```
 
-**Artifacts:** `models/ensemble_model.pkl` (fold ensemble bundle), `reports/figures/*.png`, `outputs/metrics/*`, `outputs/submissions/submission.csv`.
+| `device` | Behavior |
+| --- | --- |
+| `auto` | CUDA/GPU for all boosters when `nvidia-smi` succeeds and LightGBM CUDA build is installed; otherwise CPU |
+| `cpu` | Force CPU (CI default via `TRAINING_DEVICE=cpu`) |
+| `cuda` | CUDA/GPU for all boosters (fails fast if LightGBM CUDA build is missing) |
 
-Stages may also be run individually:
+Training logs the resolved backend at startup (`LIGHTGBM BACKEND: CUDA`, etc.).
+
+**Dependencies:** `make install` installs everything in `requirements.txt` and **never reinstalls LightGBM** if it is already present — this preserves a CUDA-enabled LightGBM build. LightGBM is excluded from `requirements.txt` for the same reason.
+
+| Environment | Command |
+| --- | --- |
+| GPU workstation (LightGBM already installed) | `make install` |
+| CPU / CI | `make install-cpu` |
+| First-time CUDA LightGBM install | `make install-cuda` |
+
+`make install-cuda` builds LightGBM from source with `-DUSE_CUDA=ON` (requires NVIDIA CUDA toolkit). Prebuilt PyPI wheels are CPU-only and will not work for GPU training.
+
+CatBoost and XGBoost GPU support is included in `requirements.txt`. Preprocessing, inference, and reporting remain on CPU.
+
+## Workflow
 
 ```bash
-python scripts/preprocess_data.py
-python scripts/train_model.py
-python scripts/generate_submission.py
+make preprocess    # Aggregate + engineer features → data/processed/
+make train         # 5-fold LGB+Cat ensemble, stacking, calibration, reports
+make evaluate      # Write evaluation_report.json
+make reports       # Regenerate reports from saved metrics (no retrain)
+make submission    # Kaggle submission CSV
+make serve         # Start API on :8000
+make test          # 95%+ coverage test suite
 ```
 
-**Migrating from an older bundle name:** if you still have `models/lightgbm_model.pkl`, rename it to **`models/ensemble_model.pkl`** or retrain so the filename matches `config.py` / `configs/config.yaml`.
+## Feature Engineering
 
----
+### Aggregation (per `SK_ID_CURR`)
+- **Bureau / bureau_balance:** delinquency streaks, recency-weighted status, windowed trends (W3/W6/W12/W13), extended stats (mean/std/median/skew)
+- **Previous applications:** approval/refusal rates, temporal patterns
+- **Installments:** late payment flags, payment ratio, recency-weighted lateness
+- **POS / credit card:** DPD frequency, utilization, balance volatility
 
-## Full automation (pipeline + smoke API)
+### Engineered Features
+- Capacity ratios (credit/income, annuity/credit, credit term)
+- Interaction features (income×credit, employment×age, credit×bureau activity)
+- Stability indicators (payment acceleration, utilization CV, credit velocity)
+- Composite delinquency index
+
+### Preprocessing
+- Missing indicators for high-null columns
+- Target encoding (fold-safe in CV) for high-cardinality categoricals
+- One-hot encoding for low-cardinality categoricals
+
+## Modeling
+
+- **Base learners:** LightGBM + CatBoost (+ optional XGBoost)
+- **Validation:** Stratified 5-fold CV with per-fold preprocessors
+- **Ensemble:** OOF-optimized blend weights + logistic stacking meta-learner
+- **Calibration:** Isotonic vs Platt scaling — auto-selected by Brier score
+- **Feature selection:** Composite ranking (LightGBM gain, mutual information, SHAP)
+- **Optional:** Optuna hyperparameter tuning (`enable_optuna: true` in config)
+
+## API
 
 ```bash
-python scripts/pipeline/run_all.py
-# or: make all
-```
-
-Runs the ML pipeline, starts a **temporary** Uvicorn on `127.0.0.1` (port from config), waits for `/health`, then smoke-tests `POST /predict`. **Load testing is manual** — start Locust separately (below).
-
----
-
-## Inference API (FastAPI)
-
-```bash
-make api
-# or: bash scripts/run_api.sh
-```
-
-- **`GET /health`** — liveness + bundle readiness hints  
-- **`POST /predict`** — body `{ "records": [ { "SK_ID_CURR": …, … } ] }`  
-
-Example payloads: `examples/payloads/`.
-
-```bash
-curl -X POST http://127.0.0.1:8000/predict \
+make serve
+curl http://127.0.0.1:8000/v1/health
+curl -X POST http://127.0.0.1:8000/v1/predict \
   -H "Content-Type: application/json" \
-  --data "@examples/payloads/minimal_request.json"
+  -d @examples/payloads/minimal_request.json
 ```
 
----
+### Endpoints
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1/health` | Model load status, bundle path |
+| `POST /v1/predict` | Batch probability scoring |
+| `GET /health`, `POST /predict` | Legacy aliases |
 
-## Load testing (Locust web UI only)
+Responses include `model_version`, `schema_version`, `calibration_method`, and `threshold`.
 
-1. Run the API (see above).  
-2. From the repo root:
-
-```bash
-python scripts/load/run_locust.py
-# or: make locust
-```
-
-3. Open **http://127.0.0.1:8089** (default UI port), set users/spawn rate, **Start swarming**.
-
-Scenarios: `tests/load/locustfile.py`. Override API URL with `--target-host` or `HOME_CREDIT_LOAD_HOST`.
-
----
+**Note:** Best accuracy requires the full engineered feature vector. The API accepts sparse payloads and imputes missing columns, but production deployments should score preprocessed feature rows.
 
 ## Docker
 
+Image and container name: **`abhishek-ml-project`**
+
 ```bash
-docker compose up --build api
+make train
+make docker-run     # builds abhishek-ml-project if missing, then runs on :8000
 ```
 
-Mount `./models` read-only; ensure **`ensemble_model.pkl`** exists before inference. Run Locust **on the host** against `http://127.0.0.1:8000` (or map ports as needed).
+To rebuild the image explicitly:
 
----
+```bash
+make docker-build
+```
+
+Or with Compose:
+
+```bash
+docker compose up --build
+```
 
 ## Testing
 
 ```bash
-python -m pytest -q
-# or: make test
+make test          # pytest with 95% coverage gate
+make smoke         # auto-starts local API if needed, then health + predict
+make docker-smoke  # frees port 8000, rebuilds image, starts Docker API, smoke test
+make load-test     # Locust load test (UI at http://127.0.0.1:8089)
 ```
 
----
+Load-test defaults in `configs/config.yaml` target **1000 users**. For high user counts (e.g. 20,000 in the Locust UI), think time is **auto-scaled** at test start to match single-node inference capacity (~8 RPS with 16 workers). Without this, the OS runs out of TCP connections and you see `Connection reset by peer`.
 
-## Makefile reference
+```bash
+python scripts/run_load_test.py --headless
+```
 
-| Target | Action |
-|--------|--------|
-| `make pipeline` | `scripts/pipeline/run_pipeline.py` |
-| `make all` | `scripts/pipeline/run_all.py` |
-| `make api` | `scripts/run_api.sh` |
-| `make test` | pytest |
-| `make locust` | Locust web UI |
-| `make smoke` | `scripts/smoke_test_api.sh` |
-| `make clean` | `.pytest_cache`, `htmlcov`, `__pycache__`, `*.pyc` |
+**Locust UI tips:** After clicking Start, check the terminal for `[load-test] Scaled think time` and `First-request stagger window`. For 20,000 users the stagger spreads the ramp burst over ~40 minutes. Use `make load-test USE_DOCKER=1` to test against Docker.
 
----
+## Configuration
+
+Key settings in `configs/config.yaml`:
+
+```yaml
+training:
+  device: auto
+  gpu_device_id: 0
+  n_folds: 5
+  enable_stacking: true
+  enable_calibration: true
+  enable_shap: true
+  enable_optuna: false
+  enable_xgboost: false
+```
+
+Environment override (optional): `TRAINING_DEVICE=cpu|cuda|auto` takes precedence over `training.device` in the YAML file.
+
+## Artifacts
+
+### What is committed vs generated
+
+| Path | Status | Contents |
+| --- | --- | --- |
+| `artifacts/models/ensemble_model.pkl` | **Generated** (excluded by `.gitignore` if large) | Full model bundle — run `make train` |
+| `artifacts/metrics/training_metrics.json` | Generated at train time | OOF AUCs, blend weights — **metric source of truth** |
+| `artifacts/metrics/fold_metrics.csv` | Generated | Per-fold performance |
+| `artifacts/reports/` | Generated (may be committed for reviewer convenience) | MD/HTML reports, `evaluation_report.json`, `index.json` |
+| `artifacts/figures/` | Generated | ROC, PR, feature importance plots |
+| `artifacts/submissions/` | Generated | Kaggle submission CSV |
+| `data/raw/*` | **Excluded** (Kaggle terms + ~2.5 GB) | Download per [data/README.md](data/README.md), or omit for synthetic demo mode |
+| `data/processed/*` | **Excluded** | Run `make preprocess` (auto-generated from synthetic data when raw CSVs are absent) |
+| `catboost_info/` | **Excluded** | Legacy CatBoost log dir at repo root — not needed; training writes to `artifacts/tmp/catboost/` if required |
+
+`.gitignore` excludes `artifacts/**` and `data/raw/*` / `data/processed/*` by default, keeping only `.gitkeep` placeholders. If reports and metrics are present in the repo, they were generated locally and committed for reviewer access — regenerate with `make train` + `make reports` for a fresh run.
 
 ## Notebooks
 
-Exploration and reporting only; **`scripts/`** is the source of truth for automation. Active notebooks live under `notebooks/`; **`notebooks/archive/`** holds legacy materials (e.g. `legacy_monolith.ipynb`).
+Exploratory notebooks live in `notebooks/` with status documented in [notebooks/README.md](notebooks/README.md). Production does not depend on them.
 
----
+## Business Recommendations
 
-## Evaluation & outputs
+1. Prioritize applicants with strong `EXT_SOURCE` scores and low installment late-payment rates.
+2. Flag revolving utilization above 80% for manual review.
+3. Monitor monthly drift in top-10 SHAP features.
+4. Use calibrated probabilities for tiered lending limits.
 
-- **Primary metric:** ROC-AUC (with supporting PR curves and feature-importance artifacts).  
-- **Reports:** `reports/figures/`, `reports/final_report.md`.  
-- **Metrics:** `outputs/metrics/`.  
-- **Submissions:** `outputs/submissions/`.
+## License & Data
 
----
-
-## API validation
-
-Pydantic enforces request shape and types; errors return JSON with `error_type`. Response probabilities are validated into `[0, 1]` for stable JSON.
+Competition data is subject to Kaggle terms. Do not commit raw or processed datasets.

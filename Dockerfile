@@ -1,22 +1,23 @@
 FROM python:3.11-slim
 
+LABEL project="Abhishek-ml project" \
+      maintainer="Abhishek"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    HOME_CREDIT_API_WORKERS=4 \
-    HOME_CREDIT_INFERENCE_FOLD_WORKERS=auto \
-    OMP_NUM_THREADS=1 \
-    OPENBLAS_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1 \
-    NUMEXPR_NUM_THREADS=1
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# LightGBM (and CatBoost) link against GNU OpenMP at runtime; slim images omit it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir "lightgbm>=4.5.0"
 
 COPY . .
-
 EXPOSE 8000
-
-# Multi-worker API (each process loads the bundle). Tune HOME_CREDIT_API_WORKERS for RAM vs throughput.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${HOME_CREDIT_API_PORT:-8000} --workers ${HOME_CREDIT_API_WORKERS:-4}"]
+CMD ["python", "scripts/run_api.py"]

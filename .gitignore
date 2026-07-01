@@ -1,8 +1,10 @@
 # -------------------------------
-# Python bytecode / cache
+# Python bytecode / cache (local only; Git must never track these)
 # -------------------------------
 __pycache__/
+**/__pycache__/
 *.pyc
+**/*.pyc
 *.py[cod]
 *$py.class
 *.pyo
@@ -42,18 +44,32 @@ venv.bak/
 # Test / coverage / type checker
 # -------------------------------
 .pytest_cache/
+**/.pytest_cache/
 .mypy_cache/
+**/.mypy_cache/
 .ruff_cache/
+**/.ruff_cache/
 .hypothesis/
+**/.hypothesis/
+.cache/
+**/.cache/
+.pytype/
+**/.pytype/
+.pyre/
+**/.pyre/
 .tox/
 .nox/
+.benchmarks/
 coverage/
 htmlcov/
+coverage.xml
 .coverage
 .coverage.*
 *.cover
 *.py,cover
 pytestdebug.log
+.dmypy.json
+dmypy.json
 
 # -------------------------------
 # Jupyter / IPython
@@ -102,9 +118,19 @@ Desktop.ini
 $RECYCLE.BIN/
 
 # -------------------------------
-# Project data and model artifacts
+# Training runtime artifacts (CatBoost logs, temp dirs)
 # -------------------------------
-data/
-models/
-outputs/
-artifacts/
+catboost_info/
+artifacts/tmp/
+data/raw/*
+data/processed/*
+data/cache/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/cache/.gitkeep
+!data/README.md
+artifacts/**
+!artifacts/
+!artifacts/**/
+!artifacts/.gitkeep
+!artifacts/**/.gitkeep

@@ -1,0 +1,58 @@
+[tool.black]
+line-length = 120
+target-version = ["py311", "py312"]
+include = "\\.pyi?$"
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | venv
+  | \.pytest_cache
+  | htmlcov
+  | data
+  | artifacts
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 120
+src_paths = ["src", "scripts", "tests"]
+skip = ["data", "artifacts", "htmlcov", ".pytest_cache"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+  ".git",
+  ".pytest_cache",
+  "venv",
+  ".venv",
+  "htmlcov",
+  "data",
+  "artifacts",
+  "notebooks",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = [
+  "E501",
+  "E402",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+check_untyped_defs = false
+disallow_incomplete_defs = false
+no_implicit_optional = true
+show_error_codes = true
+pretty = true
+ignore_missing_imports = true
+disable_error_code = ["attr-defined", "var-annotated", "union-attr", "assignment"]
+exclude = "(^data/|^artifacts/|^htmlcov/|^venv/|^\\.venv/)"
